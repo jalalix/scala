@@ -21,10 +21,10 @@ JalaliX.parseJalali("1403/12/07").toISODate // 2025-02-25
 
 ## Install
 
-Maven coordinates: `com.jalalix.scala:jalalix:0.1.0`
+Maven coordinates: `com.jalalix.scala:jalalix:0.2.0`
 
 ```scala
-libraryDependencies += "com.jalalix.scala" %% "jalalix" % "0.1.0"
+libraryDependencies += "com.jalalix.scala" %% "jalalix" % "0.2.0"
 ```
 
 ```bash
