@@ -8,15 +8,19 @@ import java.util.regex.Pattern
 import scala.collection.mutable.ArrayBuffer
 import scala.util.control.Breaks.{break, breakable}
 
-/** Options for JalaliX.create / parseJalali. */
-final case class JalaliOptions(timezone: Option[String] = None)
+/** Options for JalaliX.create / parseJalali / normalizeQueryDate. */
+final case class JalaliOptions(
+  timezone: Option[String] = None,
+  jalaliYearMin: Option[Int] = None,
+  jalaliYearMax: Option[Int] = None
+)
 
 /** Options for JalaliX.format. */
 final case class JalaliFormatOptions(calendar: Option[String] = None, persianDigits: Boolean = false)
 
 /**
  * Jalali (Persian / Shamsi) calendar on a UTC millisecond instant + IANA ZoneId.
- * Pure Scala / java.time port of @jalalix/typescript — same algorithm and camelCase API.
+ * Pure Scala / java.time port of @jalalix/typescript - same algorithm and camelCase API.
  */
 final class JalaliX private (private var time: Long, private var timezone: String) {
 
@@ -475,11 +479,17 @@ final class JalaliX private (private var time: Long, private var timezone: Strin
 
 object JalaliX {
   val persianNumbers: Array[String] = Array("۰", "۱", "۲", "۳", "۴", "۵", "۶", "۷", "۸", "۹")
+  val arabicNumbers: Array[String] = Array("٠", "١", "٢", "٣", "٤", "٥", "٦", "٧", "٨", "٩")
   private[jalalix] val LEAP_YEAR_DIVISION = 0.24219858156
   private[jalalix] val FIRST_DAY_OF_WEEK = 6
   private[jalalix] val DATE_LENGTH = 86400000L
-  private val JALALI_PARSE = Pattern.compile("^(\\d{4})[/-](\\d{1,2})[/-](\\d{1,2})(?:[ T](\\d{1,2}):(\\d{1,2})(?::(\\d{1,2}))?)?$")
+  private val JALALI_PARSE = Pattern.compile("^(\\d{4})[./-](\\d{1,2})[./-](\\d{1,2})(?:[ T](\\d{1,2}):(\\d{1,2})(?::(\\d{1,2}))?)?$")
   private val DATE_ONLY = Pattern.compile("^\\d{4}-\\d{2}-\\d{2}$")
+  private val NAN_PATTERN = Pattern.compile("NaN", Pattern.CASE_INSENSITIVE)
+  private val FRACTIONAL_SECONDS_PATTERN = Pattern.compile("(\\d{2}:\\d{2}:\\d{2})\\.\\d+")
+  private val NORMALIZE_QUERY_DATE_PATTERN = Pattern.compile(
+    "^(\\d{4})[./-](\\d{1,2})[./-](\\d{1,2})(?:[ T](\\d{1,2}):(\\d{2})(?::(\\d{2}))?(?:Z|[+-]\\d{2}:?\\d{2})?)?"
+  )
   private[jalalix] val WEEK_DAYS_NAMES = Array("شنبه", "یکشنبه", "دوشنبه", "سه شنبه", "چهار شنبه", "پنج شنبه", "جمعه")
   private[jalalix] val WEEK_DAYS_LETTERS = Array("ش", "ی", "د", "س", "چ", "پ", "ج")
   private[jalalix] val WEEK_DAYS_GREGORIAN_NAMES = Array("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")
@@ -572,11 +582,122 @@ object JalaliX {
     out
   }
 
+  /** Converts Persian (۰-۹) and Arabic-Indic (٠-٩) numerals to Western numerals (0-9). */
   def fromPersian(str: String): String = {
     var out = str
-    for (i <- 0 to 9) out = out.replace(persianNumbers(i), i.toString)
+    for (i <- 0 to 9) {
+      out = out.replace(persianNumbers(i), i.toString)
+      out = out.replace(arabicNumbers(i), i.toString)
+    }
     out
   }
 
   def compare(date: JalaliX, comparing: JalaliX): Boolean = date.getTime < comparing.getTime
+
+  /**
+   * Soft-normalizes loose query / form date inputs into a Gregorian `YYYY-MM-DD HH:mm:ss` string.
+   *
+   * Handles empty/sentinel values (`null`, `"undefined"`, `"Invalid Date"`, `"NaN"`), unix
+   * timestamps (seconds or milliseconds), Persian/Arabic digits, `/` `-` `.` separators,
+   * fractional seconds, optional `Z` / offset suffixes, and auto-detects Jalali vs Gregorian by
+   * year band: years in `jalaliYearMin..jalaliYearMax` (default `1..1899`) are treated as Jalali
+   * when the civil date is valid; otherwise Gregorian.
+   *
+   * Invalid or unrecognized values are returned cleaned (digits normalized) rather than throwing;
+   * sentinels and non-positive timestamps return `null`. Non-string / non-numeric values pass
+   * through unchanged.
+   */
+  def normalizeQueryDate(value: Any): Any = normalizeQueryDate(value, None)
+  def normalizeQueryDate(value: Any, options: JalaliOptions): Any = normalizeQueryDate(value, Some(options))
+
+  def normalizeQueryDate(value: Any, options: Option[JalaliOptions]): Any = value match {
+    case null => null
+    case s: String =>
+      val isInvalidDate = s.equalsIgnoreCase("Invalid Date") || NAN_PATTERN.matcher(s).find()
+
+      if (s == "null" || s.isEmpty || s == "undefined" || isInvalidDate) {
+        null
+      } else {
+        parseNumeric(s.trim) match {
+          case Some(ts) => normalizeQueryTimestamp(ts, options)
+          case None => normalizeQueryDateString(s, options)
+        }
+      }
+    case n: java.lang.Number => normalizeQueryTimestamp(n.longValue, options)
+    case other => other
+  }
+
+  private def parseNumeric(s: String): Option[Long] =
+    scala.util.Try(s.toLong).toOption.orElse(scala.util.Try(s.toDouble.toLong).toOption)
+
+  private def normalizeQueryTimestamp(timestampIn: Long, options: Option[JalaliOptions]): Any = {
+    val timestamp = if (timestampIn > 9999999999L) timestampIn / 1000L else timestampIn
+
+    if (timestamp <= 0) {
+      null
+    } else {
+      create(timestamp * 1000L: Any, options)
+        .format("YYYY-MM-DD HH:mm:ss", JalaliFormatOptions(calendar = Some("gregorian")))
+    }
+  }
+
+  private def normalizeQueryDateString(value: String, options: Option[JalaliOptions]): Any = {
+    val digitsRaw = fromPersian(value)
+    val digits = FRACTIONAL_SECONDS_PATTERN.matcher(digitsRaw).replaceAll("$1")
+
+    val m = NORMALIZE_QUERY_DATE_PATTERN.matcher(digits)
+
+    if (!m.find()) {
+      digits
+    } else {
+      val year = m.group(1).toInt
+      val month = m.group(2).toInt
+      val day = m.group(3).toInt
+      val hour = Option(m.group(4)).map(_.toInt).getOrElse(0)
+      val minute = Option(m.group(5)).map(_.toInt).getOrElse(0)
+      val second = Option(m.group(6)).map(_.toInt).getOrElse(0)
+
+      val jalaliYearMin = options.flatMap(_.jalaliYearMin).getOrElse(1)
+      val jalaliYearMax = options.flatMap(_.jalaliYearMax).getOrElse(1899)
+
+      if (year >= jalaliYearMin && year <= jalaliYearMax && isValidJalaliCivilDate(year, month, day)) {
+        try {
+          val jalaliStr = f"$year%04d/$month%02d/$day%02d $hour%02d:$minute%02d:$second%02d"
+
+          parseJalali(jalaliStr, options).format("YYYY-MM-DD HH:mm:ss", JalaliFormatOptions(calendar = Some("gregorian")))
+        } catch {
+          case _: IllegalArgumentException => gregorianOrDigits(year, month, day, hour, minute, second, digits)
+        }
+      } else {
+        gregorianOrDigits(year, month, day, hour, minute, second, digits)
+      }
+    }
+  }
+
+  private def gregorianOrDigits(year: Int, month: Int, day: Int, hour: Int, minute: Int, second: Int, digits: String): Any = {
+    if (isValidGregorianDate(year, month, day)) {
+      f"$year%04d-$month%02d-$day%02d $hour%02d:$minute%02d:$second%02d"
+    } else {
+      digits
+    }
+  }
+
+  /** Whether Y/M/D is a valid Jalali civil date (year >= 1). */
+  private def isValidJalaliCivilDate(year: Int, month: Int, day: Int): Boolean = {
+    if (year < 1 || month < 1 || month > 12 || day < 1) false
+    else if (month <= 6) day <= 31
+    else if (month <= 11) day <= 30
+    else {
+      val isLeap = new JalaliX(0L).checkLeapYear(year)
+      day <= (if (isLeap) 30 else 29)
+    }
+  }
+
+  private def isValidGregorianDate(year: Int, month: Int, day: Int): Boolean =
+    try {
+      LocalDate.of(year, month, day)
+      true
+    } catch {
+      case _: DateTimeException => false
+    }
 }

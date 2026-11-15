@@ -4,7 +4,7 @@ import java.nio.file.{Files, Paths}
 import org.scalatest.funsuite.AnyFunSuite
 import ujson._
 
-/** Loads testdata/golden.json and asserts parity with the TypeScript contract. */
+// Loads testdata/golden.json and asserts parity with the TypeScript contract.
 class GoldenTest extends AnyFunSuite {
 
   private val golden: Value = {

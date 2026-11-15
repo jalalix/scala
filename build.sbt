@@ -22,9 +22,13 @@ ThisBuild / developers := List(
   )
 )
 
-ThisBuild / description := "Jalali (Persian / Shamsi) calendar for Scala."
+ThisBuild / description := "Jalali (Persian / Shamsi) calendar for Scala. Sponsor: https://opencollective.com/jalalix"
 ThisBuild / licenses := List("MIT" -> url("https://opensource.org/licenses/MIT"))
 ThisBuild / homepage := Some(url("https://jalalix.com"))
+ThisBuild / pomExtra :=
+  <properties>
+    <opencollective>https://opencollective.com/jalalix</opencollective>
+  </properties>
 
 ThisBuild / pomIncludeRepository := { _ => false }
 ThisBuild / publishMavenStyle := true
